@@ -1,4 +1,4 @@
-module Go-VOD-Platform
+module github.com/EsanSamuel/go-hls-transcoder
 
 go 1.26.4
 

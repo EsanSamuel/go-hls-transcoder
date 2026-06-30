@@ -1,7 +1,6 @@
 package main
 
 import (
-	"Go-VOD-Platform/entity"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -13,6 +12,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/EsanSamuel/go-hls-transcoder/entity"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
