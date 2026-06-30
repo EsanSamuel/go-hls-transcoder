@@ -1,0 +1,406 @@
+package main
+
+import (
+	"Go-VOD-Platform/entity"
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	ffmpeg_go "github.com/u2takey/ffmpeg-go"
+)
+
+type VideoQuality struct {
+	Name    string
+	Width   int
+	Height  int
+	Bitrate string
+	Maxrate string
+	Bufsize string
+}
+
+type FFmpegService struct {
+	videoQualities []VideoQuality
+	cpuCoreRequest float32
+	cpuCoreLimit   float32
+}
+
+type Stream struct {
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+	CodecType string `json:"codec_type"`
+}
+
+type VideoData struct {
+	Streams []Stream `json:"streams"`
+}
+
+type VideoStorage interface {
+	Save(reader io.Reader, path ...string) (entity.Path, error) // Save video data to storage
+	Open(path ...string) (io.ReadCloser, error)                 // Open video file for reading
+	GetPath(path ...string) (entity.Path, error)                // Get absolute path of stored video file
+}
+
+type FFmpeg interface {
+	Transcode(input entity.Path, isPortrait bool) error   // Transcode video data
+	GetVideoDetails(path entity.Path) (*VideoData, error) // Get video details
+}
+
+type VideoUseCase struct {
+	storage VideoStorage // Interface for saving and retrieving video files
+	ffmpeg  FFmpeg       // Interface for video processing (transcoding, probing)
+}
+
+type VideoController struct {
+	videoUseCase *VideoUseCase // Use case for handling video-related operations
+}
+
+type FileSystemStorage struct {
+	baseDir entity.Path
+}
+
+func NewFileSystemStorage(baseDir string) *FileSystemStorage {
+	if baseDir == "" {
+		baseDir = "uploads"
+	}
+	return &FileSystemStorage{baseDir: entity.NewPath(baseDir)}
+}
+
+func (s *FileSystemStorage) Save(reader io.Reader, path ...string) (entity.Path, error) {
+	fullPath := s.baseDir.Join(path...).String()
+
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return entity.Path{}, fmt.Errorf("failed to create directories: %w", err)
+	}
+
+	file, err := os.Create(fullPath)
+	if err != nil {
+		return entity.Path{}, fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(file, reader); err != nil {
+		os.Remove(fullPath) // clean up partial write
+		return entity.Path{}, fmt.Errorf("failed to save video data: %w", err)
+	}
+
+	return entity.StringPathToPath(fullPath), nil
+}
+
+// Open opens a file for reading at the given path (relative to BasePath).
+// Returns a ReadCloser for the file, or an error if the file cannot be opened.
+func (s *FileSystemStorage) Open(path ...string) (io.ReadCloser, error) {
+	fullPath := s.baseDir.Join(path...).String()
+	file, err := os.Open(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open video file: %w", err)
+	}
+	return file, nil
+}
+
+// GetPath returns the absolute Path for the given relative path, if the file exists.
+// Returns an error if the file does not exist.
+func (s *FileSystemStorage) GetPath(path ...string) (entity.Path, error) {
+	fullPath := s.baseDir.Join(path...).String()
+
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		return entity.Path{}, fmt.Errorf("file does not exist: %s", fullPath)
+	}
+
+	return entity.StringPathToPath(fullPath), nil
+}
+
+var VideoQualities = []VideoQuality{
+	{"1080p", 1920, 1080, "4500k", "4700k", "6000k"},
+	{"720p", 1280, 720, "2500k", "2675k", "3750k"},
+	{"480p", 854, 480, "1000k", "1075k", "1500k"},
+	{"360p", 640, 360, "600k", "650k", "900k"},
+	{"240p", 426, 240, "400k", "450k", "600k"},
+	{"144p", 256, 144, "250k", "275k", "400k"},
+}
+
+func (vq VideoQuality) ScaleHorizonatally() string {
+	return fmt.Sprintf("scale=w=%d:h=%d:force_original_aspect_ratio=decrease", vq.Width, vq.Height)
+}
+
+func (vq VideoQuality) ScaleVertically() string {
+	return fmt.Sprintf("scale='min(%d,iw*%d/ih)':-1", vq.Width, vq.Height)
+}
+
+func (vq VideoQuality) LandScape() string {
+	return fmt.Sprintf("%dx%d", vq.Width, vq.Height)
+}
+
+func (vq VideoQuality) Portrait() string {
+	return fmt.Sprintf("%dx%d", vq.Height, vq.Width)
+}
+
+func (v VideoData) IsPortrait() bool {
+	for _, stream := range v.Streams {
+		if stream.CodecType == "video" {
+			return stream.Height > stream.Width
+		}
+	}
+	return false
+}
+
+func (s *FFmpegService) GetVideoDetails(path entity.Path) (*VideoData, error) {
+	data, err := ffmpeg_go.Probe(path.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to probe video: %w", err)
+	}
+	var result VideoData
+	if err := json.Unmarshal([]byte(data), &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal video data: %w", err)
+	}
+	return &result, nil
+}
+
+func (s *FFmpegService) Transcode(input entity.Path, isPortrait bool) error {
+	for _, q := range s.videoQualities {
+		outputPath := input.Parent().String()
+		qualityDir := filepath.Join(outputPath, "normal_hls", q.Name)
+		if err := os.MkdirAll(qualityDir, 0o755); err != nil {
+			return fmt.Errorf("failed to create output dir %s: %w", qualityDir, err)
+		}
+
+		inputPath := filepath.ToSlash(input.String())
+		segmentDir := filepath.ToSlash(qualityDir)
+		playlistPath := segmentDir + "/index.m3u8"
+		segmentPath := segmentDir + "/%03d.ts"
+		scalefilter := q.ScaleHorizonatally()
+		if isPortrait {
+			scalefilter = q.ScaleVertically()
+		}
+
+		cmd := ffmpeg_go.Input(inputPath).Output(playlistPath, s.getFFmepegArgs(q, segmentPath, []string{scalefilter, q.LandScape()}))
+
+		err := cmd.OverWriteOutput().WithOutput(nil, os.Stdout).Run()
+		if err != nil {
+			return fmt.Errorf("ffmpeg failed for quality %s: %w", q.Name, err)
+		}
+	}
+	if err := s.generateMasterPlaylist(input.Parent()); err != nil {
+		return fmt.Errorf("failed to generate master playlist: %w", err)
+	}
+	return nil
+}
+
+func (s *FFmpegService) getFFmepegArgs(q VideoQuality, segmentPath string, filters []string) ffmpeg_go.KwArgs {
+	return ffmpeg_go.KwArgs{
+		"c:v":                  "h264",                          // Use H.264 video codec
+		"profile:v":            "main",                          // Set video encoding profile to "main" for broad compatibility
+		"crf":                  "20",                            // Constant Rate Factor - balances quality and compression (lower = better quality)
+		"sc_threshold":         "0",                             // Disable scene change detection for keyframes (forces regular keyframes)
+		"g":                    "48",                            // GOP size: one keyframe every 48 frames (assuming ~2s GOP for 24fps)
+		"keyint_min":           "48",                            // Minimum interval between keyframes (same as GOP)
+		"b:v":                  q.Bitrate,                       // Target video bitrate for this quality level
+		"maxrate":              q.Maxrate,                       // Maximum allowed video bitrate
+		"bufsize":              q.Bufsize,                       // Buffer size for rate control
+		"c:a":                  "aac",                           // Use AAC audio codec
+		"ar":                   "48000",                         // Audio sampling rate (48kHz)
+		"b:a":                  "128k",                          // Audio bitrate
+		"hls_list_size":        "0",                             // Ensure the entire playlist is written (not a sliding window)
+		"hls_time":             "6",                             // Duration of each segment in seconds
+		"hls_playlist_type":    "vod",                           // Indicate this is a video-on-demand playlist
+		"start_number":         "1",                             // Start segment numbering from 1
+		"hls_segment_filename": segmentPath,                     // Pattern for naming the TS segment files
+		"hls_flags":            "round_durations+split_by_time", // Round segment durations and split strictly by time
+		"hls_allow_cache":      "1",                             // Allow caching of HLS segments
+		"vf":                   filters[0],                      // Video filter (e.g., scaling)
+		"s":                    filters[1],                      // Output resolution (explicit)
+
+	}
+}
+
+func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error {
+	id := uuid.New().String()
+
+	savedDetails, err := uc.storage.Save(reader, "videos", id, filename)
+	if err != nil {
+		return fmt.Errorf("failed to save video: %w", err)
+	}
+	fmt.Println("Video saved with details:", savedDetails)
+
+	videoDetails, err := uc.ffmpeg.GetVideoDetails(savedDetails)
+	if err != nil {
+		return fmt.Errorf("failed to get video details: %w", err)
+	}
+
+	if videoDetails == nil {
+		return fmt.Errorf("no video details available")
+	}
+	isPortrait := videoDetails.IsPortrait()
+	if err := uc.ffmpeg.Transcode(savedDetails, isPortrait); err != nil {
+		return fmt.Errorf("failed to transcode video: %w", err)
+	}
+
+	masterURL, err := uploadHLSToS3("./uploads/videos/"+id, id, "vod2")
+	if err != nil {
+		fmt.Println("Failed to upload HLS to S3:", err)
+		return fmt.Errorf("failed to upload HLS to S3: %w", err)
+	}
+	fmt.Println("HLS uploaded to S3 successfully. Master URL:", masterURL)
+	return nil
+}
+
+func (v *VideoController) UploadVideoHandler(c *gin.Context) {
+	file, header, err := c.Request.FormFile("video")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to get video file"})
+		return
+	}
+	defer file.Close()
+
+	filename := header.Filename
+	if err := v.videoUseCase.ProcessAndSave(filename, file); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Video uploaded successfully!", "filename": filename})
+}
+
+func (s *FFmpegService) generateMasterPlaylist(outputDir entity.Path) error {
+	masterFilePath := filepath.Join(outputDir.String(), "master.m3u8")
+
+	masterFile, err := os.Create(masterFilePath)
+	if err != nil {
+		return err
+	}
+	defer masterFile.Close()
+
+	writer := bufio.NewWriter(masterFile)
+	defer writer.Flush()
+
+	if _, err = writer.WriteString("#EXTM3U\n"); err != nil {
+		return err
+	}
+
+	for _, q := range s.videoQualities {
+		bandwidth := extractBandwidth(q.Bitrate)
+		line := fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s\nnormal_hls/%s/index.m3u8\n", bandwidth, q.LandScape(), q.Name)
+		if _, err = writer.WriteString(line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func extractBandwidth(bitrate string) int {
+	bitrate = strings.TrimSuffix(bitrate, "k")
+	kbps, err := strconv.Atoi(bitrate)
+	if err != nil {
+		return 0
+	}
+	return kbps * 1000
+}
+
+func uploadHLSToS3(localDir, videoID, bucket string) (string, error) {
+	key := godotenv.Load(".env")
+	if key != nil {
+		fmt.Println("Error loading .env file:", key)
+	}
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	fmt.Println("AccessKey:", accessKey)
+	fmt.Println("SecretKey:", secretKey)
+	fmt.Println("Uploading to S3...")
+	cfg, _ := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-west-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			accessKey, secretKey, "",
+		)))
+
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.UsePathStyle = true
+		o.BaseEndpoint = aws.String("https://t3.storage.dev")
+	})
+
+	err := filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		// Preserve folder structure in S3
+		relativePath, err := filepath.Rel(localDir, path)
+		if err != nil {
+			return err
+		}
+
+		relativePath = filepath.ToSlash(relativePath)
+
+		s3Key := "videos/" + videoID + "/" + relativePath
+
+		// Set correct content type
+		contentType := "video/MP2T" // for .ts files
+		if strings.HasSuffix(path, ".m3u8") {
+			contentType = "application/x-mpegURL"
+		}
+
+		fmt.Println("Uploading:", s3Key)
+
+		_, err = client.PutObject(context.TODO(), &s3.PutObjectInput{
+			Bucket:      aws.String(bucket),
+			Key:         aws.String(s3Key),
+			Body:        file,
+			ContentType: aws.String(contentType),
+		})
+		return err
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	// Return the master playlist URL
+	masterURL := "https://" + bucket + ".t3.storage.dev/videos/" + videoID + "/master.m3u8"
+	return masterURL, nil
+}
+
+func main() {
+	r := gin.Default()
+
+	storage := NewFileSystemStorage("uploads")
+	if err := os.MkdirAll(storage.baseDir.String(), 0o755); err != nil {
+		log.Fatalf("failed to create uploads directory: %v", err)
+	}
+
+	ffmpegService := &FFmpegService{videoQualities: VideoQualities}
+	videoUseCase := &VideoUseCase{storage: storage, ffmpeg: ffmpegService}
+	controller := &VideoController{videoUseCase: videoUseCase}
+
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+	r.POST("/upload", controller.UploadVideoHandler)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("starting server on :%s", port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("failed to start server: %v", err)
+	}
+}
