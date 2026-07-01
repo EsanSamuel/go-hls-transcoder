@@ -58,18 +58,14 @@ type VideoStorage interface {
 }
 
 type FFmpeg interface {
-	Transcode(input entity.Path, isPortrait bool) error   // Transcode video data
-	GetVideoDetails(path entity.Path) (*VideoData, error) // Get video details
-}
-
-type VideoConcate interface {
-	concatenateVideos(id string, reader io.Reader) (*os.File, error) // Concatenate two video files
+	Transcode(input entity.Path, isPortrait bool) error         // Transcode video data
+	GetVideoDetails(path entity.Path) (*VideoData, error)       // Get video details
+	GetSnapshot(id string, input entity.Path) (*os.File, error) // Extract snapshot from video
 }
 
 type VideoUseCase struct {
 	storage VideoStorage // Interface for saving and retrieving video files
 	ffmpeg  FFmpeg       // Interface for video processing (transcoding, probing)
-	concate VideoConcate // Interface for concatenating video files
 }
 
 type VideoController struct {
@@ -234,11 +230,10 @@ func (s *FFmpegService) getFFmepegArgs(q VideoQuality, segmentPath string, filte
 	}
 }
 
-func (uc *VideoUseCase) concatenateVideos(id string, reader io.Reader) (*os.File, error) {
-	// Create temporary directory for processing
+func createTempFileDir(id string, reader io.Reader) (*os.File, string, string, error) {
 	tempDir := filepath.Join(os.TempDir(), "vod_"+id)
 	if err := os.MkdirAll(tempDir, 0o755); err != nil {
-		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+		return nil, "", "", fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tempDir) // Clean up entire temp directory
 
@@ -246,11 +241,49 @@ func (uc *VideoUseCase) concatenateVideos(id string, reader io.Reader) (*os.File
 	uploadedVideoPath := filepath.Join(tempDir, "uploaded_video.mp4")
 	uploadedFile, err := os.Create(uploadedVideoPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create temp file for uploaded video: %w", err)
+		return nil, "", "", fmt.Errorf("failed to create temp file for uploaded video: %w", err)
 	}
 	if _, err := io.Copy(uploadedFile, reader); err != nil {
 		uploadedFile.Close()
-		return nil, fmt.Errorf("failed to save uploaded video: %w", err)
+		return nil, "", "", fmt.Errorf("failed to save uploaded video: %w", err)
+	}
+	return uploadedFile, tempDir, uploadedVideoPath, nil
+}
+
+func (s *FFmpegService) GetSnapshot(id string, input entity.Path) (*os.File, error) {
+	// Create temp directory for snapshot
+	tempDir := filepath.Join(os.TempDir(), "vod_snapshot_"+id)
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	outputPath := filepath.Join(tempDir, "snapshot.jpg")
+	timestamp := "00:00:05" // default to 5 seconds into the video
+
+	cmd := exec.Command("ffmpeg",
+		"-i", input.String(),
+		"-ss", timestamp,
+		"-vframes", "1",
+		"-q:v", "2",
+		outputPath)
+
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("failed to extract snapshot: %w, output: %s", err, string(output))
+	}
+
+	snapshotFile, err := os.Open(outputPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open snapshot file: %w", err)
+	}
+	return snapshotFile, nil
+}
+
+func (uc *VideoUseCase) concatenateVideos(id string, reader io.Reader) (*os.File, error) {
+	// Create temporary directory for processing
+	uploadedFile, tempDir, uploadedVideoPath, err := createTempFileDir(id, reader)
+	if err != nil {
+		return nil, err
 	}
 	uploadedFile.Close()
 
@@ -296,6 +329,18 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 		return fmt.Errorf("failed to save video: %w", err)
 	}
 	fmt.Println("Video saved with details:", savedDetails)
+
+	// Get snapshot from the saved file (fully written to disk)
+	snapshotFile, err := uc.ffmpeg.GetSnapshot(id, savedDetails)
+	if err != nil {
+		return fmt.Errorf("failed to get snapshot: %w", err)
+	}
+
+	savedSnapshot, err := uc.storage.Save(snapshotFile, "videos", id, "snapshot.jpg")
+	if err != nil {
+		return fmt.Errorf("failed to save snapshot: %w", err)
+	}
+	fmt.Printf("Snapshot saved: %s\n", savedSnapshot)
 
 	videoDetails, err := uc.ffmpeg.GetVideoDetails(savedDetails)
 	if err != nil {
