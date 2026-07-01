@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -61,9 +62,14 @@ type FFmpeg interface {
 	GetVideoDetails(path entity.Path) (*VideoData, error) // Get video details
 }
 
+type VideoConcate interface {
+	concatenateVideos(id string, reader io.Reader) (*os.File, error) // Concatenate two video files
+}
+
 type VideoUseCase struct {
 	storage VideoStorage // Interface for saving and retrieving video files
 	ffmpeg  FFmpeg       // Interface for video processing (transcoding, probing)
+	concate VideoConcate // Interface for concatenating video files
 }
 
 type VideoController struct {
@@ -228,10 +234,64 @@ func (s *FFmpegService) getFFmepegArgs(q VideoQuality, segmentPath string, filte
 	}
 }
 
+func (uc *VideoUseCase) concatenateVideos(id string, reader io.Reader) (*os.File, error) {
+	// Create temporary directory for processing
+	tempDir := filepath.Join(os.TempDir(), "vod_"+id)
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir) // Clean up entire temp directory
+
+	// Save uploaded video to temporary file
+	uploadedVideoPath := filepath.Join(tempDir, "uploaded_video.mp4")
+	uploadedFile, err := os.Create(uploadedVideoPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file for uploaded video: %w", err)
+	}
+	if _, err := io.Copy(uploadedFile, reader); err != nil {
+		uploadedFile.Close()
+		return nil, fmt.Errorf("failed to save uploaded video: %w", err)
+	}
+	uploadedFile.Close()
+
+	// Check if trademark video exists
+	trademarkVideoPath := filepath.Join("test_files", "trademark.mp4")
+	if _, err := os.Stat(trademarkVideoPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("trademark video not found at %s", trademarkVideoPath)
+	}
+
+	// Concatenate videos using FFmpeg filter_complex
+	concatenatedPath := filepath.Join(tempDir, "concatenated.mp4")
+	cmd := exec.Command("ffmpeg",
+		"-i", trademarkVideoPath,
+		"-i", uploadedVideoPath,
+		"-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
+		"-map", "[v]",
+		"-map", "[a]",
+		"-c:v", "h264",
+		"-c:a", "aac",
+		concatenatedPath)
+
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("failed to concatenate videos: %w, output: %s", err, string(output))
+	}
+
+	// Read concatenated video and save to storage
+	concatenatedFile, err := os.Open(concatenatedPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open concatenated video: %w", err)
+	}
+	return concatenatedFile, nil
+}
+
 func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error {
 	id := uuid.New().String()
+	concatenatedFile, err := uc.concatenateVideos(id, reader)
+	if err != nil {
+		return fmt.Errorf("failed to concatenate videos: %w", err)
+	}
 
-	savedDetails, err := uc.storage.Save(reader, "videos", id, filename)
+	savedDetails, err := uc.storage.Save(concatenatedFile, "videos", id, "concatenated.mp4")
 	if err != nil {
 		return fmt.Errorf("failed to save video: %w", err)
 	}
@@ -241,6 +301,7 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 	if err != nil {
 		return fmt.Errorf("failed to get video details: %w", err)
 	}
+	fmt.Printf("Video Details: %+v\n", videoDetails)
 
 	if videoDetails == nil {
 		return fmt.Errorf("no video details available")
