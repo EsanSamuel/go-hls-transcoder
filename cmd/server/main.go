@@ -58,9 +58,10 @@ type VideoStorage interface {
 }
 
 type FFmpeg interface {
-	Transcode(input entity.Path, isPortrait bool) error         // Transcode video data
-	GetVideoDetails(path entity.Path) (*VideoData, error)       // Get video details
-	GetSnapshot(id string, input entity.Path) (*os.File, error) // Extract snapshot from video
+	Transcode(input entity.Path, isPortrait bool) error          // Transcode video data
+	GetVideoDetails(path entity.Path) (*VideoData, error)        // Get video details
+	GetSnapshot(id string, input entity.Path) (*os.File, error)  // Extract snapshot from video
+	extractAudio(input entity.Path, id string) (*os.File, error) // Extract audio from video
 }
 
 type VideoUseCase struct {
@@ -317,9 +318,35 @@ func (uc *VideoUseCase) concatenateVideos(id string, reader io.Reader) (*os.File
 	return concatenatedFile, nil
 }
 
+func (s *FFmpegService) extractAudio(input entity.Path, id string) (*os.File, error) {
+	tempDir := filepath.Join(os.TempDir(), "vod_audio_"+id)
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	output := filepath.Join(tempDir, "audio.wav")
+	cmd := ffmpeg_go.Input(input.String()).Output(output, ffmpeg_go.KwArgs{
+		"vn": "",    // Disable video
+		"ac": 1,     // Mono
+		"ar": 16000, // 16 kHz
+	})
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("failed to extract audio: %w, output: %s", err, output)
+	}
+
+	outputFile, err := os.Open(output)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open extracted audio file: %w", err)
+	}
+	return outputFile, nil
+}
+
 func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error {
 	id := uuid.New().String()
 	concatenatedFile, err := uc.concatenateVideos(id, reader)
+
+	fmt.Println("Concetenated File name:", concatenatedFile.Name())
 	if err != nil {
 		return fmt.Errorf("failed to concatenate videos: %w", err)
 	}
@@ -341,6 +368,16 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 		return fmt.Errorf("failed to save snapshot: %w", err)
 	}
 	fmt.Printf("Snapshot saved: %s\n", savedSnapshot)
+
+	outputAudio, err := uc.ffmpeg.extractAudio(entity.StringPathToPath(concatenatedFile.Name()), id)
+	if err != nil {
+		return fmt.Errorf("failed to extract audio: %w", err)
+	}
+	audioFile, err := uc.storage.Save(outputAudio, "videos", id, "audio", id+".wav")
+	if err != nil {
+		return fmt.Errorf("failed to save audio: %w", err)
+	}
+	fmt.Printf("Audio saved: %s\n", audioFile)
 
 	videoDetails, err := uc.ffmpeg.GetVideoDetails(savedDetails)
 	if err != nil {
@@ -418,15 +455,12 @@ func extractBandwidth(bitrate string) int {
 }
 
 func uploadHLSToS3(localDir, videoID, bucket string) (string, error) {
-	key := godotenv.Load(".env")
-	if key != nil {
-		fmt.Println("Error loading .env file:", key)
-	}
 	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
 	fmt.Println("AccessKey:", accessKey)
 	fmt.Println("SecretKey:", secretKey)
 	fmt.Println("Uploading to S3...")
+
 	cfg, _ := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-west-1"),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			accessKey, secretKey, "",
@@ -487,6 +521,16 @@ func uploadHLSToS3(localDir, videoID, bucket string) (string, error) {
 func main() {
 	r := gin.Default()
 
+	key := godotenv.Load(".env")
+	if key != nil {
+		fmt.Println("Error loading .env file:", key)
+	}
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+
+	fmt.Println("AccessKey:", accessKey)
+	fmt.Println("SecretKey:", secretKey)
+
 	storage := NewFileSystemStorage("uploads")
 	if err := os.MkdirAll(storage.baseDir.String(), 0o755); err != nil {
 		log.Fatalf("failed to create uploads directory: %v", err)
@@ -495,6 +539,12 @@ func main() {
 	ffmpegService := &FFmpegService{videoQualities: VideoQualities}
 	videoUseCase := &VideoUseCase{storage: storage, ffmpeg: ffmpegService}
 	controller := &VideoController{videoUseCase: videoUseCase}
+
+	masterURL, err := uploadHLSToS3("uploads/videos/5d275b94-e950-44a2-9ba2-ff6d15937a5f", "5d275b94-e950-44a2-9ba2-ff6d15937a5f", "vod2")
+	if err != nil {
+		fmt.Println("Failed to upload HLS to S3:", err)
+	}
+	fmt.Println("S3 URL:", masterURL)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
