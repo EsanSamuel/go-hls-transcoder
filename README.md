@@ -1,263 +1,128 @@
 # VOD - Video On Demand Service
 
-A Go-based video processing and streaming service that handles video upload, concatenation, thumbnail extraction, and HLS transcoding for multi-quality adaptive streaming.
+A Go-based video processing service that accepts uploaded videos, concatenates them with a trademark clip, extracts a thumbnail and audio, runs transcription, and generates HLS outputs for adaptive streaming.
 
-## Features
+## What the service does
 
-- **Video Concatenation**: Automatically concatenate uploaded videos with a trademark video
-- **Snapshot Extraction**: Extract thumbnail images from videos at customizable timestamps
-- **Multi-Quality HLS Transcoding**: Convert videos to 6 quality levels (144p to 1080p)
-- **AWS S3 Integration**: Upload HLS artifacts to S3-compatible storage
-- **REST API**: Simple HTTP endpoints for video management
-- **Clean Architecture**: Dependency injection with Go interfaces for maintainability
+When a video is uploaded, the server currently performs the following workflow:
 
-## Architecture
+1. Saves the uploaded file to the local uploads directory.
+2. Concatenates the uploaded video with a trademark video from test_files/trademark.mp4.
+3. Extracts a snapshot at 5 seconds.
+4. Extracts audio from the concatenated video.
+5. Sends the audio to AssemblyAI for transcription.
+6. Generates HLS playlists and segment files for multiple quality levels.
+7. Attempts to upload the generated HLS output to S3-compatible storage if the required AWS settings are present.
 
-The project uses **Clean Architecture** principles with clear separation of concerns:
+## Requirements
 
-```
-VideoController (HTTP Layer)
-    ↓
-VideoUseCase (Business Logic)
-    ↓
-VideoStorage Interface  +  FFmpeg Interface
-    ↓                           ↓
-FileSystemStorage         FFmpegService
-(File I/O)               (Video Processing)
-```
-
-### Key Components
-
-- **VideoStorage Interface**: Abstracts video file storage operations
-- **FFmpeg Interface**: Abstracts video processing operations (transcoding, probing, snapshots)
-- **VideoUseCase**: Orchestrates the video processing pipeline
-- **VideoController**: HTTP request handlers
-
-## Supported Quality Levels
-
-| Quality | Resolution | Bitrate | Max Rate | Buffer Size |
-|---------|-----------|---------|----------|------------|
-| 1080p   | 1920x1080 | 4500k   | 4700k    | 6000k      |
-| 720p    | 1280x720  | 2500k   | 2675k    | 3750k      |
-| 480p    | 854x480   | 1000k   | 1075k    | 1500k      |
-| 360p    | 640x360   | 600k    | 650k     | 900k       |
-| 240p    | 426x240   | 400k    | 450k     | 600k       |
-| 144p    | 256x144   | 250k    | 275k     | 400k       |
-
-## Prerequisites
-
-- Go 1.16+
-- FFmpeg with libmp4box support
-- FFprobe (included with FFmpeg)
+- Go 1.26 or newer
+- FFmpeg installed and available in your PATH
+- FFprobe available via FFmpeg
+- A trademark video placed at test_files/trademark.mp4
 
 ## Installation
 
-### 1. Clone the repository
-```bash
-cd c:\Users\user\Desktop\VOD
-```
+1. Clone the repository.
+2. Install Go dependencies:
 
-### 2. Install dependencies
 ```bash
 go mod download
 ```
 
-### 3. Set environment variables
-Create a `.env` file in the project root:
+3. Create a `.env` file in the project root with the following values:
+
 ```env
+PORT=8080
+ASSEMBLYAI_API_KEY=your_assemblyai_key
 AWS_ACCESS_KEY_ID=your_access_key
 AWS_SECRET_ACCESS_KEY=your_secret_key
-PORT=8080
 ```
 
-### 4. Prepare test files
-Place your trademark video at:
-```
-test_files/trademark.mp4
-```
-
-## Usage
-
-### Start the Server
+4. Make sure the trademark file exists:
 
 ```bash
-go run cmd/server/main.go
+mkdir -p test_files
+# place your trademark.mp4 file at test_files/trademark.mp4
 ```
 
-The server will start on `http://localhost:8080` (or the port specified in `PORT` environment variable).
+## Running the server
 
-### API Endpoints
-
-#### Health Check
 ```bash
-GET /health
+go run ./cmd/server
 ```
 
-Response:
+The server starts on port `8080` by default, or on the value provided in `PORT`.
+
+## API
+
+### Health check
+
+```bash
+curl http://localhost:8080/health
+```
+
+Example response:
+
 ```json
 {
   "status": "ok"
 }
 ```
 
-#### Upload Video
-```bash
-POST /upload
-Content-Type: multipart/form-data
+### Upload a video
 
-Form field: "video" (binary video file)
+```bash
+curl -X POST http://localhost:8080/upload \
+  -F "video=@/path/to/video.mp4"
 ```
 
-Response:
+Example response:
+
 ```json
 {
   "message": "Video uploaded successfully!",
-  "filename": "example.mp4"
+  "filename": "video.mp4"
 }
 ```
 
-## Processing Pipeline
+## Output locations
 
-When a video is uploaded, the following steps occur:
+Processed assets are written under the local uploads directory:
 
-1. **Concatenation**: Upload → Trademark concatenation using FFmpeg filter_complex
-2. **Storage**: Save concatenated video to permanent storage
-3. **Snapshot**: Extract thumbnail from saved video (5 seconds mark)
-4. **Video Details**: Probe video to extract metadata (resolution, codec, duration)
-5. **Transcoding** *(commented out)*: Convert to 6 quality levels with HLS segments
-6. **S3 Upload** *(commented out)*: Upload HLS artifacts to S3
-
-## File Structure
-
-```
-VOD/
-├── cmd/
-│   └── server/
-│       ├── main.go              # Main application code
-│       └── uploads/             # Local storage for videos
-│           └── videos/
-│               └── {video_id}/
-│                   ├── concatenated.mp4
-│                   ├── snapshot.jpg
-│                   └── normal_hls/
-│                       ├── 1080p/
-│                       ├── 720p/
-│                       ├── ...
-│                       └── 144p/
-├── entity/
-│   └── entity.go                # Data models
-├── test_files/
-│   └── trademark.mp4            # Trademark video for concatenation
-├── go.mod                       # Go module definition
-└── README.md                    # This file
-```
-
-## Storage Paths
-
-### Local File System
-```
+```text
 uploads/
 └── videos/
-    └── {UUID}/
-        ├── concatenated.mp4           # Original concatenated video
-        ├── snapshot.jpg               # Video thumbnail
-        └── normal_hls/
-            ├── master.m3u8            # Main HLS playlist
-            ├── 1080p/
-            │   ├── index.m3u8
-            │   ├── 001.ts
-            │   └── ...
-            ├── 720p/
-            └── ...
-```
-
-### AWS S3 (if enabled)
-```
-s3://bucket/
-└── videos/
     └── {video_id}/
-        ├── normal_hls/
-        │   ├── master.m3u8
-        │   ├── 1080p/
-        │   ├── 720p/
-        │   └── ...
+        ├── concatenated.mp4
+        ├── snapshot.jpg
+        ├── audio/
+        │   └── {video_id}.wav
+        └── normal_hls/
+            ├── master.m3u8
+            ├── 1080p/
+            ├── 720p/
+            ├── 480p/
+            ├── 360p/
+            ├── 240p/
+            └── 144p/
 ```
 
-## Dependencies
+## Notes
 
-### Core Dependencies
-- **gin-gonic/gin**: HTTP web framework
-- **aws-sdk-go-v2**: AWS SDK for S3 operations
-- **ffmpeg-go**: Go wrapper for FFmpeg
-- **google/uuid**: UUID generation
-- **joho/godotenv**: Environment variable loading
+- The upload endpoint requires a multipart form field named `video`.
+- Transcription depends on `ASSEMBLYAI_API_KEY` being set.
+- S3 upload is attempted when AWS credentials and bucket configuration are available; otherwise the process may fail after HLS generation.
+- The current implementation uses local filesystem storage for the generated video artifacts.
 
-### External Tools
-- **FFmpeg**: Video processing and encoding
-- **FFprobe**: Video probing and metadata extraction
+## Project structure
 
-## Error Handling
-
-The application uses error wrapping with `%w` to preserve error chains:
-
-```go
-if err != nil {
-    return fmt.Errorf("operation failed: %w", err)
-}
+```text
+cmd/server/main.go      # HTTP server and processing pipeline
+entity/entity.go        # Path helpers and shared models
+test_files/             # Trademark media used during concatenation
+uploads/                # Local output directory for generated assets
 ```
-
-This allows callers to inspect root causes using `errors.Is()` and `errors.As()`.
-
-## Clean Architecture Principles Used
-
-### Interfaces
-Dependency inversion through interfaces:
-```go
-type VideoStorage interface {
-    Save(reader io.Reader, path ...string) (entity.Path, error)
-    Open(path ...string) (io.ReadCloser, error)
-    GetPath(path ...string) (entity.Path, error)
-}
-
-type FFmpeg interface {
-    Transcode(input entity.Path, isPortrait bool) error
-    GetVideoDetails(path entity.Path) (*VideoData, error)
-    GetSnapshot(id string, input entity.Path) (*os.File, error)
-}
-```
-
-### Dependency Injection
-Dependencies are injected into the VideoUseCase:
-```go
-type VideoUseCase struct {
-    storage VideoStorage
-    ffmpeg  FFmpeg
-}
-```
-
-### Single Responsibility
-Each component has a single, well-defined responsibility:
-- Controllers: HTTP request/response handling
-- UseCases: Business logic orchestration
-- Services: Implementation of specific operations
-
-## Performance Considerations
-
-- **Temporary Files**: Large video files are processed through temporary directories to avoid memory exhaustion
-- **HLS Segments**: 6-second segments provide good balance between seeking accuracy and file count
-- **Bitrate Control**: CBR with max rate limiting prevents bandwidth spikes
-- **Parallel Quality Encoding**: Multiple quality levels can be encoded (currently sequential)
-
-## Future Enhancements
-
-- [ ] Enable parallel transcoding for multiple quality levels
-- [ ] Re-enable S3 upload functionality
-- [ ] Add video format validation
-- [ ] Implement progress tracking for long-running operations
-- [ ] Add database integration for video metadata
-- [ ] Support for custom video layouts (watermarks, overlays)
-- [ ] Implement video trimming/clipping
-- [ ] Add subtitle/caption support
 
 ## Troubleshooting
 
