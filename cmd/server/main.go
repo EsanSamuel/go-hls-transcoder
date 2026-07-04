@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/AssemblyAI/assemblyai-go-sdk"
 	"github.com/EsanSamuel/go-hls-transcoder/entity"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -336,6 +337,7 @@ func (s *FFmpegService) extractAudio(input entity.Path, id string) (*os.File, er
 	}
 
 	outputFile, err := os.Open(output)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to open extracted audio file: %w", err)
 	}
@@ -379,6 +381,16 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 	}
 	fmt.Printf("Audio saved: %s\n", audioFile)
 
+	audioPathReader, err := os.Open("./uploads/videos/" + id + "/audio/" + id + ".wav")
+	if err != nil {
+		return fmt.Errorf("failed to open audio file: %w", err)
+	}
+	defer audioPathReader.Close()
+
+	if err := uc.ExtractTextFromAudio(id, audioPathReader); err != nil {
+		return err
+	}
+
 	videoDetails, err := uc.ffmpeg.GetVideoDetails(savedDetails)
 	if err != nil {
 		return fmt.Errorf("failed to get video details: %w", err)
@@ -399,6 +411,26 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 		return fmt.Errorf("failed to upload HLS to S3: %w", err)
 	}
 	fmt.Println("HLS uploaded to S3 successfully. Master URL:", masterURL)
+	return nil
+}
+
+func (uc *VideoUseCase) ExtractTextFromAudio(id string, reader io.Reader) error {
+	ASSEMBLYAI_API := os.Getenv("ASSEMBLYAI_API_KEY")
+	if ASSEMBLYAI_API == "" {
+		return fmt.Errorf("ASSEMBLYAI_API_KEY is not set in environment variables")
+	}
+	client := assemblyai.NewClient(ASSEMBLYAI_API)
+
+	transcript, err := client.Transcripts.TranscribeFromReader(
+		context.Background(),
+		reader,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(*transcript.Text)
 	return nil
 }
 
@@ -540,11 +572,11 @@ func main() {
 	videoUseCase := &VideoUseCase{storage: storage, ffmpeg: ffmpegService}
 	controller := &VideoController{videoUseCase: videoUseCase}
 
-	masterURL, err := uploadHLSToS3("uploads/videos/5d275b94-e950-44a2-9ba2-ff6d15937a5f", "5d275b94-e950-44a2-9ba2-ff6d15937a5f", "vod2")
+	/*masterURL, err := uploadHLSToS3("uploads/videos/5d275b94-e950-44a2-9ba2-ff6d15937a5f", "5d275b94-e950-44a2-9ba2-ff6d15937a5f", "vod2")
 	if err != nil {
 		fmt.Println("Failed to upload HLS to S3:", err)
 	}
-	fmt.Println("S3 URL:", masterURL)
+	fmt.Println("S3 URL:", masterURL)*/
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
