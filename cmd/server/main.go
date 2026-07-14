@@ -15,7 +15,9 @@ import (
 	"strings"
 
 	"github.com/AssemblyAI/assemblyai-go-sdk"
+	ai_config "github.com/EsanSamuel/go-hls-transcoder/config"
 	"github.com/EsanSamuel/go-hls-transcoder/entity"
+	"github.com/EsanSamuel/go-hls-transcoder/rag"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -348,10 +350,10 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 	id := uuid.New().String()
 	concatenatedFile, err := uc.concatenateVideos(id, reader)
 
-	fmt.Println("Concetenated File name:", concatenatedFile.Name())
 	if err != nil {
 		return fmt.Errorf("failed to concatenate videos: %w", err)
 	}
+	fmt.Println("Concetenated File name:", concatenatedFile.Name())
 
 	savedDetails, err := uc.storage.Save(concatenatedFile, "videos", id, "concatenated.mp4")
 	if err != nil {
@@ -387,9 +389,16 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 	}
 	defer audioPathReader.Close()
 
-	if err := uc.ExtractTextFromAudio(id, audioPathReader); err != nil {
+	transcript, err := uc.ExtractTextFromAudio(id, audioPathReader)
+	if err != nil {
 		return err
 	}
+	fmt.Println("Extracted Transcript:", transcript)
+	transcriptFile, err := uc.storage.Save(strings.NewReader(transcript), "videos", id, "transcript.txt")
+	if err != nil {
+		return fmt.Errorf("failed to save transcript: %w", err)
+	}
+	fmt.Printf("Transcript saved: %s\n", transcriptFile)
 
 	videoDetails, err := uc.ffmpeg.GetVideoDetails(savedDetails)
 	if err != nil {
@@ -400,7 +409,7 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 	if videoDetails == nil {
 		return fmt.Errorf("no video details available")
 	}
-	isPortrait := videoDetails.IsPortrait()
+	/*isPortrait := videoDetails.IsPortrait()
 	if err := uc.ffmpeg.Transcode(savedDetails, isPortrait); err != nil {
 		return fmt.Errorf("failed to transcode video: %w", err)
 	}
@@ -410,14 +419,14 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 		fmt.Println("Failed to upload HLS to S3:", err)
 		return fmt.Errorf("failed to upload HLS to S3: %w", err)
 	}
-	fmt.Println("HLS uploaded to S3 successfully. Master URL:", masterURL)
+	fmt.Println("HLS uploaded to S3 successfully. Master URL:", masterURL)*/
 	return nil
 }
 
-func (uc *VideoUseCase) ExtractTextFromAudio(id string, reader io.Reader) error {
+func (uc *VideoUseCase) ExtractTextFromAudio(id string, reader io.Reader) (string, error) {
 	ASSEMBLYAI_API := os.Getenv("ASSEMBLYAI_API_KEY")
 	if ASSEMBLYAI_API == "" {
-		return fmt.Errorf("ASSEMBLYAI_API_KEY is not set in environment variables")
+		return "", fmt.Errorf("ASSEMBLYAI_API_KEY is not set in environment variables")
 	}
 	client := assemblyai.NewClient(ASSEMBLYAI_API)
 
@@ -427,11 +436,11 @@ func (uc *VideoUseCase) ExtractTextFromAudio(id string, reader io.Reader) error 
 		nil,
 	)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	fmt.Println(*transcript.Text)
-	return nil
+	return *transcript.Text, nil
 }
 
 func (v *VideoController) UploadVideoHandler(c *gin.Context) {
@@ -550,6 +559,47 @@ func uploadHLSToS3(localDir, videoID, bucket string) (string, error) {
 	return masterURL, nil
 }
 
+type AskAIRequest struct {
+	VideoID  string `json:"video_id"`
+	Question string `json:"question"`
+}
+
+type AskAIResponse struct {
+	Answer string  `json:"answer"`
+	Score  float32 `json:"score"`
+	Prompt string  `json:"prompt"`
+}
+
+func (v *VideoController) AskAIHandler(c *gin.Context) {
+	var req AskAIRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request", "details": err.Error()})
+		return
+	}
+
+	transcriptPath := fmt.Sprintf("./uploads/videos/%s/transcript.txt", req.VideoID)
+	data, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load transcript"})
+		return
+	}
+
+	chunks := rag.ChunkText(string(data))
+
+	score, prompt := rag.ProcessChunks(chunks, req.Question)
+	answer, err := ai_config.Ai(prompt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI request failed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, AskAIResponse{
+		Answer: answer,
+		Score:  score,
+		Prompt: prompt,
+	})
+}
+
 func main() {
 	r := gin.Default()
 
@@ -582,6 +632,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	r.POST("/upload", controller.UploadVideoHandler)
+	r.POST("/ask-AI", controller.AskAIHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
