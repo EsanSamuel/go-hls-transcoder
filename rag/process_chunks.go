@@ -49,7 +49,7 @@ Retrieved chunks:
 func ProcessChunks(chunks []Chunk, query string) (float32, string) {
 	var queryEmbeddings []float32 = config.AIEmbeddings(query)
 	for i := range chunks {
-		if chunks[i].Embeddings != nil {
+		if chunks[i].Embeddings == nil {
 			chunks[i].Embeddings = config.AIEmbeddings(chunks[i].Text)
 		}
 	}

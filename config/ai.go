@@ -24,7 +24,7 @@ func Ai(prompt string) (string, error) {
 
 	result, err := client.Models.GenerateContent(
 		ctx,
-		"gemini-2.5-flash",
+		"gemini-3.5-flash",
 		genai.Text(prompt),
 		nil,
 	)
