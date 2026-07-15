@@ -1,20 +1,32 @@
 package database
 
 import (
-	"log"
+	"context"
+	//"log"
 	"os"
 
 	"github.com/pinecone-io/go-pinecone/v4/pinecone"
 )
 
-func PineconeClient() *pinecone.Client {
-	apiKey := os.Getenv("PINECONE_API_KEY")
+var idxConn *pinecone.IndexConnection
 
+func InitPinecone() (*pinecone.IndexConnection, error) {
+	ctx := context.Background()
 	pc, err := pinecone.NewClient(pinecone.NewClientParams{
-		ApiKey: apiKey,
+		ApiKey: os.Getenv("PINECONE_API_KEY"),
 	})
 	if err != nil {
-		log.Printf("Failed to create Client: %v", err)
+		return nil, err
 	}
-	return pc
+
+	idx, err := pc.DescribeIndex(ctx, "vod")
+	if err != nil {
+		return nil, err
+	}
+
+	idxConn, err = pc.Index(pinecone.NewIndexConnParams{
+		Host:      idx.Host,
+		Namespace: "docs",
+	})
+	return idxConn, err
 }

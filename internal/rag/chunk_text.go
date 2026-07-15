@@ -10,17 +10,38 @@ type Chunk struct {
 }
 
 func ChunkText(text string) []Chunk {
-	paragraphs := strings.Split(text, "\n")
-	chunkID := 0
-	var Chunks []Chunk
+	const (
+		chunkSize = 250
+		overlap   = 50
+	)
 
-	for _, paragraph := range paragraphs {
-		paragraph = strings.TrimSpace(paragraph)
-		Chunks = append(Chunks, Chunk{
-			Text:    paragraph,
-			ChunkID: chunkID + 1,
-		})
-		chunkID++
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return nil
 	}
-	return Chunks
+
+	var chunks []Chunk
+	step := chunkSize - overlap
+
+	chunkID := 1
+
+	for i := 0; i < len(words); i += step {
+		end := i + chunkSize
+		if end > len(words) {
+			end = len(words)
+		}
+
+		chunks = append(chunks, Chunk{
+			ChunkID: chunkID,
+			Text:    strings.Join(words[i:end], " "),
+		})
+
+		chunkID++
+
+		if end == len(words) {
+			break
+		}
+	}
+
+	return chunks
 }

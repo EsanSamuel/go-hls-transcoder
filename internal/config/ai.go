@@ -46,10 +46,11 @@ func AIEmbeddings(text string) []float32 {
 	contents := []*genai.Content{
 		genai.NewContentFromText(text, genai.RoleUser),
 	}
+	dimensionality := int32(1024)
 	result, err := client.Models.EmbedContent(ctx,
 		"gemini-embedding-2",
 		contents,
-		nil,
+		&genai.EmbedContentConfig{OutputDimensionality: &dimensionality},
 	)
 	if err != nil {
 		log.Fatal(err)

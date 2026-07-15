@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"github.com/AssemblyAI/assemblyai-go-sdk"
-	"github.com/EsanSamuel/go-hls-transcoder/internal/database"
 	"github.com/EsanSamuel/go-hls-transcoder/internal/entity"
 	"github.com/EsanSamuel/go-hls-transcoder/internal/rag"
 
@@ -633,9 +632,6 @@ func main() {
 	})
 	r.POST("/upload", controller.UploadVideoHandler)
 	r.POST("/ask-AI", controller.AskAIHandler)
-
-	databaseClient := database.PineconeClient()
-	fmt.Println("Pinecone Client initialized:", databaseClient)
 
 	port := os.Getenv("PORT")
 	if port == "" {
