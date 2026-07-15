@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/EsanSamuel/go-hls-transcoder/config"
+	"github.com/EsanSamuel/go-hls-transcoder/internal/config"
 )
 
 const VideoQAInstruction = `You are a retrieval-augmented video QA assistant.
@@ -46,7 +46,7 @@ Retrieved chunks:
 %s`, VideoQAInstruction, query, strings.Join(retrievedChunks, "\n\n"))
 }
 
-func ProcessChunks(chunks []Chunk, query string) (float32, string) {
+func ProcessChunks(chunks []Chunk, query string) (float32, string, string, error) {
 	var queryEmbeddings []float32 = config.AIEmbeddings(query)
 	for i := range chunks {
 		if chunks[i].Embeddings == nil {
@@ -91,7 +91,7 @@ func ProcessChunks(chunks []Chunk, query string) (float32, string) {
 	answer, err := config.Ai(prompt)
 	if err != nil {
 		log.Printf("Error generating answer: %v", err)
-		return 0, ""
+		return 0, "", "", err
 	}
-	return chunks[0].Score, answer
+	return chunks[0].Score, answer, prompt, nil
 }

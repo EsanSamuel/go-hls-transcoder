@@ -29,7 +29,7 @@ func Ai(prompt string) (string, error) {
 		nil,
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		return "", err
 	}
 	//fmt.Println(result.Text())

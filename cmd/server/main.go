@@ -15,9 +15,9 @@ import (
 	"strings"
 
 	"github.com/AssemblyAI/assemblyai-go-sdk"
-	ai_config "github.com/EsanSamuel/go-hls-transcoder/config"
-	"github.com/EsanSamuel/go-hls-transcoder/entity"
-	"github.com/EsanSamuel/go-hls-transcoder/rag"
+	"github.com/EsanSamuel/go-hls-transcoder/internal/database"
+	"github.com/EsanSamuel/go-hls-transcoder/internal/entity"
+	"github.com/EsanSamuel/go-hls-transcoder/internal/rag"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -409,7 +409,7 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 	if videoDetails == nil {
 		return fmt.Errorf("no video details available")
 	}
-	/*isPortrait := videoDetails.IsPortrait()
+	isPortrait := videoDetails.IsPortrait()
 	if err := uc.ffmpeg.Transcode(savedDetails, isPortrait); err != nil {
 		return fmt.Errorf("failed to transcode video: %w", err)
 	}
@@ -419,7 +419,7 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 		fmt.Println("Failed to upload HLS to S3:", err)
 		return fmt.Errorf("failed to upload HLS to S3: %w", err)
 	}
-	fmt.Println("HLS uploaded to S3 successfully. Master URL:", masterURL)*/
+	fmt.Println("HLS uploaded to S3 successfully. Master URL:", masterURL)
 	return nil
 }
 
@@ -586,8 +586,8 @@ func (v *VideoController) AskAIHandler(c *gin.Context) {
 
 	chunks := rag.ChunkText(string(data))
 
-	score, prompt := rag.ProcessChunks(chunks, req.Question)
-	answer, err := ai_config.Ai(prompt)
+	score, answer, prompt, err := rag.ProcessChunks(chunks, req.Question)
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI request failed"})
 		return
@@ -633,6 +633,9 @@ func main() {
 	})
 	r.POST("/upload", controller.UploadVideoHandler)
 	r.POST("/ask-AI", controller.AskAIHandler)
+
+	databaseClient := database.PineconeClient()
+	fmt.Println("Pinecone Client initialized:", databaseClient)
 
 	port := os.Getenv("PORT")
 	if port == "" {
