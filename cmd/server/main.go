@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 	ffmpeg_go "github.com/u2takey/ffmpeg-go"
 )
@@ -408,7 +409,7 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 	if videoDetails == nil {
 		return fmt.Errorf("no video details available")
 	}
-	isPortrait := videoDetails.IsPortrait()
+	/*isPortrait := videoDetails.IsPortrait()
 	if err := uc.ffmpeg.Transcode(savedDetails, isPortrait); err != nil {
 		return fmt.Errorf("failed to transcode video: %w", err)
 	}
@@ -418,7 +419,7 @@ func (uc *VideoUseCase) ProcessAndSave(filename string, reader io.Reader) error 
 		fmt.Println("Failed to upload HLS to S3:", err)
 		return fmt.Errorf("failed to upload HLS to S3: %w", err)
 	}
-	fmt.Println("HLS uploaded to S3 successfully. Master URL:", masterURL)
+	fmt.Println("HLS uploaded to S3 successfully. Master URL:", masterURL)*/
 	return nil
 }
 
@@ -569,34 +570,44 @@ type AskAIResponse struct {
 	Prompt string  `json:"prompt"`
 }
 
-func (v *VideoController) AskAIHandler(c *gin.Context) {
-	var req AskAIRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request", "details": err.Error()})
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
+func (v *VideoController) AskAIWebSocketHandler(c *gin.Context) {
+	videoID := c.Param("videoID")
+
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Println(err)
 		return
 	}
+	defer conn.Close()
 
-	transcriptPath := fmt.Sprintf("./uploads/videos/%s/transcript.txt", req.VideoID)
+	transcriptPath := fmt.Sprintf("./uploads/videos/%s/transcript.txt", videoID)
 	data, err := os.ReadFile(transcriptPath)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load transcript"})
+		conn.WriteJSON(gin.H{"error": "failed to load transcript"})
 		return
 	}
-
 	chunks := rag.ChunkText(string(data))
 
-	score, answer, prompt, err := rag.ProcessChunks(chunks, req.Question)
+	for {
+		var req AskAIRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			break // client disconnected or sent bad data
+		}
 
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI request failed"})
-		return
+		score, answer, prompt, err := rag.ProcessChunks(chunks, req.Question)
+		if err != nil {
+			conn.WriteJSON(gin.H{"error": "AI request failed"})
+			continue
+		}
+		fmt.Println(AskAIResponse{Answer: answer, Score: score, Prompt: prompt})
+
+		conn.WriteJSON(AskAIResponse{Answer: answer, Score: score, Prompt: prompt})
 	}
-
-	c.JSON(http.StatusOK, AskAIResponse{
-		Answer: answer,
-		Score:  score,
-		Prompt: prompt,
-	})
 }
 
 func main() {
@@ -631,7 +642,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	r.POST("/upload", controller.UploadVideoHandler)
-	r.POST("/ask-AI", controller.AskAIHandler)
+	r.GET("ws/ask-AI/:videoID", controller.AskAIWebSocketHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
