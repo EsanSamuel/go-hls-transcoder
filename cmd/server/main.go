@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/EsanSamuel/go-hls-transcoder/internal/rag"
 	"github.com/EsanSamuel/go-hls-transcoder/internal/storage"
@@ -110,7 +112,7 @@ func main() {
 	videoUseCase := &video.VideoUseCase{Storage: storage, FFmpeg: ffmpegService}
 	controller := &VideoController{videoUseCase: videoUseCase}
 
-	go worker.VodWorker()
+	go worker.VodWorker(*videoUseCase)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -127,4 +129,8 @@ func main() {
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("failed to start server: %v", err)
 	}
+
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
+	<-signalChan
 }

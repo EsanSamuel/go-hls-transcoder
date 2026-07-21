@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/EsanSamuel/go-hls-transcoder/internal/config"
 	"github.com/EsanSamuel/go-hls-transcoder/internal/entity"
@@ -29,7 +30,10 @@ var redisPool = &redis.Pool{
 	},
 }
 
-func VodWorker() {
+var sharedUC video.VideoUseCase
+
+func VodWorker(uc video.VideoUseCase) {
+	sharedUC = uc
 	pool := work.NewWorkerPool(Context{}, 10, "vod", redisPool)
 
 	pool.Middleware((*Context).Log)
@@ -42,7 +46,7 @@ func VodWorker() {
 	pool.Start()
 
 	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt, os.Kill)
+	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
 	<-signalChan
 
 	// Stop the pool
@@ -56,6 +60,7 @@ func (c *Context) Log(job *work.Job, next work.NextMiddlewareFunc) error {
 
 func (c *Context) Find(job *work.Job, next work.NextMiddlewareFunc) error {
 	// If there's a customer_id param, set it in the context for future middleware and handlers to use.
+	c.uc = sharedUC
 	if _, ok := job.Args["id"]; ok {
 		c.id = job.ArgString("id")
 		if err := job.ArgError(); err != nil {
@@ -76,13 +81,20 @@ func (c *Context) IsPortrait() bool {
 }
 
 func (c *Context) ProcessTranscoder(job *work.Job) error {
-	// Extract arguments:
 	filePath := entity.NewPath(job.ArgString("file_path"))
 	id := job.ArgString("id")
 	if err := job.ArgError(); err != nil {
 		return err
 	}
-	isPortrait := c.IsPortrait()
+	c.filePath = filePath
+
+	videoDetails, err := c.uc.FFmpeg.GetVideoDetails(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to get video details: %w", err)
+	}
+	c.v = videoDetails
+
+	isPortrait := c.v.IsPortrait()
 	if err := c.uc.FFmpeg.Transcode(filePath, isPortrait); err != nil {
 		return fmt.Errorf("failed to transcode video: %w", err)
 	}

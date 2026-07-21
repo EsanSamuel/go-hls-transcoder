@@ -223,17 +223,34 @@ func (uc *VideoUseCase) concatenateVideos(id string, reader io.Reader) (*os.File
 	uploadedFile.Close()
 
 	// Check if trademark video exists
-	trademarkVideoPath := filepath.Join("test_files", "trademark.mp4")
+	trademarkVideoPath := filepath.Join("test_files", "netflix-intro.mp4")
 	if _, err := os.Stat(trademarkVideoPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("trademark video not found at %s", trademarkVideoPath)
 	}
+
+	const targetW, targetH = 1280, 720
+
+	/*WHAT I LEARNT*/
+	// Normalize both inputs to the same resolution/SAR/fps before concatenating.
+	// concat requires matching stream parameters across all inputs, which is
+	// why mixing a 1920x800 intro with a 640x360 upload was failing.
+
+	filterComplex := fmt.Sprintf(
+		"[0:v]scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v0];"+
+			"[1:v]scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30[v1];"+
+			"[0:a]aresample=44100[a0];"+
+			"[1:a]aresample=44100[a1];"+
+			"[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]",
+		targetW, targetH, targetW, targetH,
+		targetW, targetH, targetW, targetH,
+	)
 
 	// Concatenate videos using FFmpeg filter_complex
 	concatenatedPath := filepath.Join(tempDir, "concatenated.mp4")
 	cmd := exec.Command("ffmpeg",
 		"-i", trademarkVideoPath,
 		"-i", uploadedVideoPath,
-		"-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
+		"-filter_complex", filterComplex,
 		"-map", "[v]",
 		"-map", "[a]",
 		"-c:v", "h264",

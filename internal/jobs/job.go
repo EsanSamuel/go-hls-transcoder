@@ -20,7 +20,7 @@ var redisPool *redis.Pool = &redis.Pool{
 var enqueuer *work.Enqueuer = work.NewEnqueuer("vod", redisPool)
 
 func EnqueueTranscodeJob(filePath entity.Path, id string) {
-	_, err := enqueuer.Enqueue("process_transcoder", work.Q{"file_path": filePath, "id": id})
+	_, err := enqueuer.Enqueue("process_transcoder", work.Q{"file_path": filePath.String(), "id": id})
 	if err != nil {
 		log.Fatal(err)
 	}
