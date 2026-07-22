@@ -14,9 +14,11 @@ import (
 )
 
 func UploadHLSToS3(localDir, videoID, bucket string) (string, error) {
-	accessKey := os.Getenv("S3_ACCESS_KEY")
-	secretKey := os.Getenv("S3_SECRET_KEY")
-	fmt.Println("SecretKey:", secretKey)
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	if accessKey == "" || secretKey == "" {
+		return "", fmt.Errorf("missing S3 credentials: access=%v secret=%v", accessKey != "", secretKey != "")
+	}
 	fmt.Println("Uploading to S3...")
 
 	cfg, _ := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-west-1"),
